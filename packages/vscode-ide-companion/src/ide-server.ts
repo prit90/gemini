@@ -87,9 +87,34 @@ async function writePortAndWorkspace({
 
   log(`Writing port file to: ${portFile}`);
 
+  // Write the port file securely and atomically.
+  //
+  // The original `writeFile + chmod` opened a TOCTOU window where the token
+  // file was briefly world-readable (default umask) before chmod locked it
+  // down, letting local attackers read the IDE companion auth token on
+  // multi-user systems (#28278). `mode` only applies to newly created files,
+  // so we also unlink-then-write with the exclusive `wx` flag to guarantee
+  // 0o600 lands on a fresh file (prevents pre-creation/stale-file attacks
+  // where an attacker pre-creates the file with loose permissions).
+  //
+  // To avoid a window where the port file is missing (unlink + write is not
+  // atomic - a client read in between fails, and a failed write leaves no
+  // file at all), write to a temp file then `rename` it into place. rename is
+  // atomic on POSIX, so clients always see either the old or the new file,
+  // and a failed write leaves the previous port file intact. `mode` is
+  // honored on POSIX; on Windows it is ignored (the prior chmod was already
+  // a no-op there).
+  const tempPortFile = portFile + '.tmp';
   try {
-    await fs.writeFile(portFile, content).then(() => fs.chmod(portFile, 0o600));
+    await fs.unlink(tempPortFile).catch(() => {
+      // Temp file didn't exist (the common case) - expected, ignore.
+    });
+    await fs.writeFile(tempPortFile, content, { mode: 0o600, flag: 'wx' });
+    await fs.rename(tempPortFile, portFile);
   } catch (err) {
+    await fs.unlink(tempPortFile).catch(() => {
+      // Best-effort cleanup of the temp file on failure.
+    });
     const message = err instanceof Error ? err.message : String(err);
     log(`Failed to write port to file: ${message}`);
   }

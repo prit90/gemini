@@ -28,6 +28,7 @@ vi.mock('node:fs/promises', () => ({
   unlink: vi.fn(() => Promise.resolve(undefined)),
   chmod: vi.fn(() => Promise.resolve(undefined)),
   mkdir: vi.fn(() => Promise.resolve(undefined)),
+  rename: vi.fn(() => Promise.resolve(undefined)),
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -158,11 +159,19 @@ describe('IDEServer', () => {
     expect(fs.mkdir).toHaveBeenCalledWith(path.join('/tmp', 'gemini', 'ide'), {
       recursive: true,
     });
+    // The temp file is removed before the exclusive write so the 0o600 mode
+    // always applies to a fresh file, then renamed into place atomically
+    // (see #28278).
+    expect(fs.unlink).toHaveBeenCalledWith(expectedPortFile + '.tmp');
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedPortFile + '.tmp',
       expectedContent,
+      { mode: 0o600, flag: 'wx' },
     );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+    expect(fs.rename).toHaveBeenCalledWith(
+      expectedPortFile + '.tmp',
+      expectedPortFile,
+    );
   });
 
   it('should set a single folder path', async () => {
@@ -189,10 +198,14 @@ describe('IDEServer', () => {
       authToken: 'test-auth-token',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedPortFile + '.tmp',
       expectedContent,
+      { mode: 0o600, flag: 'wx' },
     );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+    expect(fs.rename).toHaveBeenCalledWith(
+      expectedPortFile + '.tmp',
+      expectedPortFile,
+    );
   });
 
   it('should set an empty string if no folders are open', async () => {
@@ -219,10 +232,14 @@ describe('IDEServer', () => {
       authToken: 'test-auth-token',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedPortFile + '.tmp',
       expectedContent,
+      { mode: 0o600, flag: 'wx' },
     );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+    expect(fs.rename).toHaveBeenCalledWith(
+      expectedPortFile + '.tmp',
+      expectedPortFile,
+    );
   });
 
   it('should update the path when workspace folders change', async () => {
@@ -267,10 +284,14 @@ describe('IDEServer', () => {
       authToken: 'test-auth-token',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedPortFile + '.tmp',
       expectedContent,
+      { mode: 0o600, flag: 'wx' },
     );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+    expect(fs.rename).toHaveBeenCalledWith(
+      expectedPortFile + '.tmp',
+      expectedPortFile,
+    );
 
     // Simulate removing a folder
     vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/baz/qux' } }];
@@ -286,10 +307,14 @@ describe('IDEServer', () => {
       authToken: 'test-auth-token',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedPortFile + '.tmp',
       expectedContent2,
+      { mode: 0o600, flag: 'wx' },
     );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+    expect(fs.rename).toHaveBeenCalledWith(
+      expectedPortFile + '.tmp',
+      expectedPortFile,
+    );
   });
 
   it('should clear env vars and delete port file on stop', async () => {
@@ -302,7 +327,15 @@ describe('IDEServer', () => {
       'ide',
       `gemini-ide-server-${process.ppid}-${port}.json`,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(portFile, expect.any(String));
+    expect(fs.writeFile).toHaveBeenCalledWith(
+      portFile + '.tmp',
+      expect.any(String),
+      {
+        mode: 0o600,
+        flag: 'wx',
+      },
+    );
+    expect(fs.rename).toHaveBeenCalledWith(portFile + '.tmp', portFile);
 
     await ideServer.stop();
 
@@ -340,10 +373,14 @@ describe('IDEServer', () => {
         authToken: 'test-auth-token',
       });
       expect(fs.writeFile).toHaveBeenCalledWith(
-        expectedPortFile,
+        expectedPortFile + '.tmp',
         expectedContent,
+        { mode: 0o600, flag: 'wx' },
       );
-      expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
+      expect(fs.rename).toHaveBeenCalledWith(
+        expectedPortFile + '.tmp',
+        expectedPortFile,
+      );
     },
   );
 
