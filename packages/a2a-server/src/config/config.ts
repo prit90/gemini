@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as dotenv from 'dotenv';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
   AuthType,
@@ -28,11 +29,189 @@ import {
   type TelemetryTarget,
   type ConfigParameters,
   type ExtensionLoader,
+  resolveToRealPath,
 } from '@google/gemini-cli-core';
 
 import { logger } from '../utils/logger.js';
 import type { Settings } from './settings.js';
 import { type AgentSettings, CoderAgentEvent } from '../types.js';
+
+export const envStorage = new AsyncLocalStorage<TaskEnv>();
+
+const deletedKeysSymbol = Symbol('deletedKeys');
+export const cwdSymbol = Symbol('cwd');
+
+export interface TaskEnv extends Record<string, string> {
+  [deletedKeysSymbol]?: Set<string>;
+  [cwdSymbol]?: string;
+}
+
+// Set up a Proxy on process.env to intercept reads and writes, isolating environment variables per task
+const originalEnv = process.env;
+const envProxy = new Proxy(originalEnv, {
+  get(target, prop) {
+    if (typeof prop === 'string') {
+      const taskEnv = envStorage.getStore();
+      if (taskEnv) {
+        const deleted = taskEnv[deletedKeysSymbol];
+        if (deleted?.has(prop)) {
+          return undefined;
+        }
+        if (Object.prototype.hasOwnProperty.call(taskEnv, prop)) {
+          return taskEnv[prop];
+        }
+      }
+      return target[prop];
+    }
+    /* eslint-disable-next-line no-restricted-syntax, @typescript-eslint/no-unsafe-return */
+    return Reflect.get(target, prop);
+  },
+  has(target, prop) {
+    if (typeof prop === 'string') {
+      const taskEnv = envStorage.getStore();
+      if (taskEnv) {
+        const deleted = taskEnv[deletedKeysSymbol];
+        if (deleted?.has(prop)) {
+          return false;
+        }
+        if (Object.prototype.hasOwnProperty.call(taskEnv, prop)) {
+          return true;
+        }
+      }
+      return prop in target;
+    }
+    /* eslint-disable-next-line no-restricted-syntax */
+    return Reflect.has(target, prop);
+  },
+  set(target, prop, value) {
+    if (typeof prop === 'string') {
+      if (
+        prop === '__proto__' ||
+        prop === 'constructor' ||
+        prop === 'prototype'
+      ) {
+        return false;
+      }
+      const taskEnv = envStorage.getStore();
+      if (taskEnv) {
+        taskEnv[deletedKeysSymbol]?.delete(prop);
+        taskEnv[prop] = String(value);
+        return true;
+      }
+      target[prop] = String(value);
+      return true;
+    }
+    /* eslint-disable-next-line no-restricted-syntax */
+    return Reflect.set(target, prop, value);
+  },
+  deleteProperty(target, prop) {
+    if (typeof prop === 'string') {
+      if (
+        prop === '__proto__' ||
+        prop === 'constructor' ||
+        prop === 'prototype'
+      ) {
+        return false;
+      }
+      const taskEnv = envStorage.getStore();
+      if (taskEnv) {
+        delete taskEnv[prop];
+        (taskEnv[deletedKeysSymbol] ??= new Set()).add(prop);
+        return true;
+      }
+      delete target[prop];
+      return true;
+    }
+    /* eslint-disable-next-line no-restricted-syntax */
+    return Reflect.deleteProperty(target, prop);
+  },
+  ownKeys(target) {
+    const taskEnv = envStorage.getStore();
+    if (taskEnv) {
+      const keys = new Set<string | symbol>([
+        ...Object.getOwnPropertyNames(target),
+        ...Object.getOwnPropertySymbols(target),
+        ...Object.keys(taskEnv),
+      ]);
+      taskEnv[deletedKeysSymbol]?.forEach((key) => {
+        keys.delete(key);
+      });
+      keys.delete(deletedKeysSymbol);
+      keys.delete(cwdSymbol);
+      return Array.from(keys);
+    }
+    return [
+      ...Object.getOwnPropertyNames(target),
+      ...Object.getOwnPropertySymbols(target),
+    ];
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    const taskEnv = envStorage.getStore();
+    if (taskEnv && typeof prop === 'string') {
+      const deleted = taskEnv[deletedKeysSymbol];
+      if (deleted?.has(prop)) {
+        return undefined;
+      }
+      if (Object.prototype.hasOwnProperty.call(taskEnv, prop)) {
+        return {
+          value: taskEnv[prop],
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        };
+      }
+    }
+    /* eslint-disable-next-line no-restricted-syntax */
+    return Reflect.getOwnPropertyDescriptor(target, prop);
+  },
+});
+
+// Replace process.env with the proxy
+Object.defineProperty(process, 'env', {
+  value: envProxy,
+  writable: true,
+  configurable: true,
+});
+
+const originalCwd = process.cwd;
+process.cwd = function () {
+  const taskEnv = envStorage.getStore();
+  if (taskEnv && taskEnv[cwdSymbol]) {
+    return taskEnv[cwdSymbol];
+  }
+  return originalCwd.call(process);
+};
+
+const originalChdir = process.chdir;
+process.chdir = function (directory: string) {
+  const taskEnv = envStorage.getStore();
+  if (taskEnv) {
+    const resolved = resolveToRealPath(path.resolve(process.cwd(), directory));
+    const initialWorkspace = taskEnv[cwdSymbol];
+    if (initialWorkspace) {
+      const relative = path.relative(initialWorkspace, resolved);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        const err = new Error(
+          "EACCES: permission denied, chdir outside workspace '" +
+            resolved +
+            "'",
+        );
+        throw err;
+      }
+    }
+    const stats = fs.statSync(resolved);
+    if (!stats.isDirectory()) {
+      const err = new Error(
+        "ENOTDIR: not a directory, chdir '" + resolved + "'",
+      );
+      (err as NodeJS.ErrnoException).code = 'ENOTDIR';
+      throw err;
+    }
+    taskEnv[cwdSymbol] = resolved;
+    return;
+  }
+  return originalChdir.call(process, directory);
+};
 
 const INITIAL_FOLDER_TRUST = process.env['GEMINI_FOLDER_TRUST'];
 
@@ -41,9 +220,8 @@ export async function loadConfig(
   extensionLoader: ExtensionLoader,
   taskId: string,
   trusted: boolean = false,
+  workspaceDir: string = process.cwd(),
 ): Promise<Config> {
-  const workspaceDir = process.cwd();
-
   const folderTrust =
     settings.folderTrust === true ||
     process.env['GEMINI_FOLDER_TRUST'] === 'true';
@@ -210,8 +388,26 @@ export function setTargetDir(agentSettings: AgentSettings | undefined): string {
   );
 
   try {
-    const resolvedPath = path.resolve(targetDir);
-    process.chdir(resolvedPath);
+    const resolvedPath = resolveToRealPath(targetDir);
+    const allowedRoot = resolveToRealPath(
+      process.env['CODER_AGENT_ALLOWED_ROOT'] || originalCWD,
+    );
+    const relative = path.relative(allowedRoot, resolvedPath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      logger.warn(
+        `[CoderAgentExecutor] Workspace path ${resolvedPath} is outside the allowed root directory, returning original os.cwd()`,
+      );
+      return originalCWD;
+    }
+    if (
+      !fs.existsSync(resolvedPath) ||
+      !fs.statSync(resolvedPath).isDirectory()
+    ) {
+      logger.warn(
+        `[CoderAgentExecutor] Workspace path ${resolvedPath} does not exist or is not a directory, returning original os.cwd()`,
+      );
+      return originalCWD;
+    }
     return resolvedPath;
   } catch (e) {
     logger.error(
@@ -221,11 +417,47 @@ export function setTargetDir(agentSettings: AgentSettings | undefined): string {
   }
 }
 
-export function loadEnvironment(): void {
-  const envFilePath = findEnvFile(process.cwd());
-  if (envFilePath) {
-    dotenv.config({ path: envFilePath, override: true });
+export function loadEnvironment(
+  isTrusted: boolean = false,
+  workspacePath: string = process.cwd(),
+): Record<string, string> {
+  // For untrusted workspaces, we completely bypass workspace-level .env loading
+  // and only load environment variables from the user's trusted home directory.
+  let envFilePath: string | null = null;
+  if (isTrusted) {
+    envFilePath = findEnvFile(workspacePath);
+  } else {
+    const homeGeminiEnvPath = path.join(homedir(), GEMINI_DIR, '.env');
+    if (fs.existsSync(homeGeminiEnvPath)) {
+      envFilePath = homeGeminiEnvPath;
+    } else {
+      const homeEnvPath = path.join(homedir(), '.env');
+      if (fs.existsSync(homeEnvPath)) {
+        envFilePath = homeEnvPath;
+      }
+    }
   }
+  const envVars: Record<string, string> = {};
+  if (envFilePath) {
+    try {
+      const content = fs.readFileSync(envFilePath, 'utf-8');
+      const parsed = dotenv.parse(content);
+      for (const key in parsed) {
+        if (
+          Object.prototype.hasOwnProperty.call(parsed, key) &&
+          key !== '__proto__' &&
+          key !== 'constructor' &&
+          key !== 'prototype'
+        ) {
+          envVars[key] = parsed[key];
+          process.env[key] = parsed[key];
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+  return envVars;
 }
 
 function findEnvFile(startDir: string): string | null {
@@ -242,19 +474,17 @@ function findEnvFile(startDir: string): string | null {
     }
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir || !parentDir) {
-      // check .env under home as fallback, again preferring gemini-specific .env
-      const homeGeminiEnvPath = path.join(process.cwd(), GEMINI_DIR, '.env');
-      if (fs.existsSync(homeGeminiEnvPath)) {
-        return homeGeminiEnvPath;
-      }
-      const homeEnvPath = path.join(homedir(), '.env');
-      if (fs.existsSync(homeEnvPath)) {
-        return homeEnvPath;
-      }
-      return null;
+      break;
     }
     currentDir = parentDir;
   }
+  // check .env under home as fallback, again preferring gemini-specific .env
+  const homeGeminiEnvPath = path.join(homedir(), GEMINI_DIR, '.env');
+  if (fs.existsSync(homeGeminiEnvPath)) {
+    return homeGeminiEnvPath;
+  }
+  const homeEnvPath = path.join(homedir(), '.env');
+  return fs.existsSync(homeEnvPath) ? homeEnvPath : null;
 }
 
 async function refreshAuthentication(
