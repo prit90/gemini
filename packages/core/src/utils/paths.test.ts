@@ -521,9 +521,25 @@ describe('resolveToRealPath', () => {
       expected: path.resolve('path', 'to', 'file'),
     },
     {
-      description: 'should decode URI components',
-      input: path.resolve('path', 'to', 'some folder').replace(/ /g, '%20'),
+      description: 'should decode URI components in file:// URLs',
+      input: pathToFileURL(
+        path.resolve('path', 'to', 'some folder'),
+      ).toString(),
       expected: path.resolve('path', 'to', 'some folder'),
+    },
+    {
+      description:
+        'should NOT decode percent-encoding in plain filesystem paths (#28276)',
+      input: path.resolve('path', 'to', 'report%202026.txt'),
+      expected: path.resolve('path', 'to', 'report%202026.txt'),
+    },
+    {
+      description:
+        'should preserve literal % in file:// URLs without double-decoding (#28276)',
+      input: pathToFileURL(
+        path.resolve('path', 'to', 'report%202026.txt'),
+      ).toString(),
+      expected: path.resolve('path', 'to', 'report%202026.txt'),
     },
     {
       description: 'should handle both file protocol and encoding',
