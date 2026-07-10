@@ -122,7 +122,7 @@ export class CoderAgentExecutor implements AgentExecutor {
     const initialSettings = loadSettings(workspaceRoot, false);
     const { isTrusted } = checkPathTrust({
       path: workspaceRoot,
-      isFolderTrustEnabled: initialSettings.folderTrust,
+      isFolderTrustEnabled: initialSettings.folderTrust ?? true,
       isHeadless: isHeadlessMode(),
     });
 
@@ -136,15 +136,6 @@ export class CoderAgentExecutor implements AgentExecutor {
       );
       return fn(isTrusted ?? false, workspaceRoot);
     });
-  }
-
-  private async getConfig(
-    agentSettings: AgentSettings,
-    taskId: string,
-  ): Promise<Config> {
-    return this.runInIsolatedEnv(agentSettings, (isTrusted, workspaceRoot) =>
-      this.getConfigWithEnv(agentSettings, taskId, isTrusted, workspaceRoot),
-    );
   }
 
   /**
