@@ -2179,7 +2179,7 @@ describe('loadCliConfig context management', () => {
     vi.restoreAllMocks();
   });
 
-  it('should be false by default when generalistProfile / context management is not set in settings', async () => {
+  it('should be false by default when context management is not set in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments(createTestMergedSettings());
     const settings = createTestMergedSettings();
@@ -2191,12 +2191,12 @@ describe('loadCliConfig context management', () => {
     expect(config.isContextManagementEnabled()).toBe(false);
   });
 
-  it('should be true when generalistProfile is set to true in settings', async () => {
+  it('should be true when contextManagement is set to true in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments(createTestMergedSettings());
     const settings = createTestMergedSettings({
       experimental: {
-        generalistProfile: true,
+        contextManagement: true,
       },
     });
     const config = await loadCliConfig(settings, 'test-session', argv);
